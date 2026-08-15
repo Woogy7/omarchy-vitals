@@ -149,6 +149,9 @@ Panel {
     return 0
   }
   property bool cursorActive: false
+  // Where the process cursor came from. A keyboard cursor follows its process
+  // when the table re-sorts; a mouse hover stays under the pointer.
+  property bool cursorFromKeys: false
 
   function selectTab(index) {
     if (tabs.length === 0) return
@@ -158,6 +161,7 @@ Panel {
     if (filtering) stopFiltering()
     tabKey = tabs[i].key
     procIndex = 0
+    cursorFromKeys = false
     if (tabKey === "proc") rebuildProcs()
   }
 
@@ -267,7 +271,7 @@ Panel {
     // The table re-sorts on every sample, so remember which *process* the
     // cursor is on and find it again in the new order — otherwise the row
     // under the highlight would silently change identity between ticks.
-    var followPid = cursorActive && procIndex >= 0 && procIndex < sortedProcs.length ? sortedProcs[procIndex].pid : -1
+    var followPid = cursorActive && cursorFromKeys && procIndex >= 0 && procIndex < sortedProcs.length ? sortedProcs[procIndex].pid : -1
     sortedProcs = list
     var n = list.length
     var selectedStillHere = false
@@ -303,8 +307,17 @@ Panel {
 
   function moveProcCursor(delta) {
     if (sortedProcs.length === 0) return
+    cursorFromKeys = true
     procIndex = clamp(procIndex + delta, 0, sortedProcs.length - 1)
     procScrollTo(procIndex)
+  }
+
+  function jumpProcCursor(toEnd) {
+    if (sortedProcs.length === 0) return
+    cursorActive = true
+    cursorFromKeys = true
+    procIndex = toEnd ? sortedProcs.length - 1 : 0
+    if (procTab && procTab.scrollToEdge) procTab.scrollToEdge(toEnd)
   }
 
   // Click / Enter: expand the row into its detail card with actions.
@@ -446,6 +459,8 @@ Panel {
         else if (t === "S") root.cycleSort(-1)
         else if (t === "r" || t === "R") { root.sortReverse = !root.sortReverse; root.rebuildProcs() }
         else if (t === "/" || t === "f" || t === "F") root.startFiltering()
+        else if (t === "g") root.jumpProcCursor(false)
+        else if (t === "G") root.jumpProcCursor(true)
       }
 
       Flickable {
@@ -1143,6 +1158,7 @@ Panel {
       spacing: Style.space(8)
 
       function scrollTo(index) { procList.positionViewAtIndex(index, ListView.Contain) }
+      function scrollToEdge(toEnd) { if (toEnd) procList.positionViewAtEnd(); else procList.positionViewAtBeginning() }
       function focusFilter() { filterField.forceActiveFocus(); filterField.selectAll() }
       function clearFilterField() { filterField.text = "" }
 
@@ -1312,9 +1328,10 @@ Panel {
               hoverEnabled: true
               acceptedButtons: Qt.LeftButton
               cursorShape: Qt.PointingHandCursor
-              onPositionChanged: { root.cursorActive = true; root.procIndex = procRow.index }
+              onPositionChanged: { root.cursorActive = true; root.cursorFromKeys = false; root.procIndex = procRow.index }
               onClicked: {
                 root.cursorActive = true
+                root.cursorFromKeys = false
                 root.procIndex = procRow.index
                 root.toggleSelected(procRow.model.pid)
               }

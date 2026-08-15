@@ -56,6 +56,7 @@ Keyboard, while the panel is open:
 | `←` `→` / `h` `l` | previous / next tab |
 | `1`–`6` | jump to a tab |
 | `↑` `↓` / `j` `k` | move the process cursor (scroll on other tabs) |
+| `g` / `G` | jump to the top / bottom of the process list |
 | `s` / `S` | next / previous sort column |
 | `r` | reverse sort |
 | `/` or `f` | filter processes (Esc clears, Enter returns to the list) |
