@@ -8,7 +8,8 @@ import "Model.js" as Model
 
 // Vitals: a calm system monitor panel. One tab at a time — CPU, Memory,
 // Disks, Network, GPU, Processes — fed by collector.py, which only runs while
-// the panel is open.
+// the panel is open. Each tab is a Loader that is only alive while selected,
+// so a hidden tab costs nothing per sample.
 Panel {
   id: root
   moduleName: "io.github.woogy7.vitals"
@@ -58,7 +59,7 @@ Panel {
 
   function close() {
     setCenterHoverRevealSuppressed(false)
-    if (root.confirmOpen) root.cancelTerminate()
+    if (root.confirmOpen) root.cancelSignal()
     if (root.filtering) root.stopFiltering()
     root.controller.hide()
   }
@@ -127,7 +128,7 @@ Panel {
     var iface = currentIface(parsed.net ? (parsed.net.ifaces || []) : [])
     rxHistory = Model.pushHistory(rxHistory, iface ? iface.rx_bps : 0, historyLength)
     txHistory = Model.pushHistory(txHistory, iface ? iface.tx_bps : 0, historyLength)
-    rebuildProcs()
+    if (tabKey === "proc") rebuildProcs()
   }
 
   // ---- tabs ------------------------------------------------------------------
@@ -153,8 +154,11 @@ Panel {
     if (tabs.length === 0) return
     var n = tabs.length
     var i = ((index % n) + n) % n
+    if (tabs[i].key === tabKey) return
+    if (filtering) stopFiltering()
     tabKey = tabs[i].key
     procIndex = 0
+    if (tabKey === "proc") rebuildProcs()
   }
 
   // Jump to a tab by key: cpu · mem · disk · net · gpu · proc.
@@ -237,10 +241,12 @@ Panel {
   property string sortKey: "cpu"
   property bool sortReverse: false
   property int procIndex: 0
+  property int selectedPid: -1
   property string filterText: ""
   property bool filtering: false
   property var sortedProcs: []
   readonly property var sortColumns: ["name", "pid", "user", "mem", "cpu"]
+  readonly property var procTab: procLoader.item
 
   function setSort(key) {
     if (sortKey === key) sortReverse = !sortReverse
@@ -264,11 +270,14 @@ Panel {
     var followPid = cursorActive && procIndex >= 0 && procIndex < sortedProcs.length ? sortedProcs[procIndex].pid : -1
     sortedProcs = list
     var n = list.length
+    var selectedStillHere = false
     for (var i = 0; i < n; i++) {
       var p = list[i]
-      var row = { pid: p.pid, name: p.name, user: p.user, cpu: p.cpu, mem: p.mem, threads: p.threads, cmd: p.cmd }
+      var row = { pid: p.pid, ppid: p.ppid, name: p.name, user: p.user, cpu: p.cpu, mem: p.mem,
+                  threads: p.threads, state: p.state || "", cmd: p.cmd }
       if (i < procModel.count) procModel.set(i, row)
       else procModel.append(row)
+      if (p.pid === selectedPid) selectedStillHere = true
     }
     while (procModel.count > n) procModel.remove(procModel.count - 1)
     if (followPid >= 0) {
@@ -276,26 +285,42 @@ Panel {
         if (list[j].pid === followPid) {
           if (j !== procIndex) {
             procIndex = j
-            procList.positionViewAtIndex(j, ListView.Contain)
+            procScrollTo(j)
           }
           break
         }
       }
     }
     if (procIndex >= n) procIndex = Math.max(0, n - 1)
+    if (selectedPid >= 0 && !selectedStillHere && filterText === "") selectedPid = -1
   }
 
   ListModel { id: procModel }
 
+  function procScrollTo(index) {
+    if (procTab && procTab.scrollTo) procTab.scrollTo(index)
+  }
+
   function moveProcCursor(delta) {
     if (sortedProcs.length === 0) return
     procIndex = clamp(procIndex + delta, 0, sortedProcs.length - 1)
-    procList.positionViewAtIndex(procIndex, ListView.Contain)
+    procScrollTo(procIndex)
+  }
+
+  // Click / Enter: expand the row into its detail card with actions.
+  function toggleSelected(pid) {
+    selectedPid = selectedPid === pid ? -1 : pid
+  }
+
+  function activateCursor() {
+    if (tabKey !== "proc") return
+    if (!cursorActive) { cursorActive = true; return }
+    if (procIndex >= 0 && procIndex < sortedProcs.length) toggleSelected(sortedProcs[procIndex].pid)
   }
 
   function startFiltering() {
     filtering = true
-    Qt.callLater(function() { filterField.forceActiveFocus(); filterField.selectAll() })
+    if (procTab && procTab.focusFilter) procTab.focusFilter()
   }
 
   function stopFiltering() {
@@ -305,37 +330,50 @@ Panel {
 
   function clearFilter() {
     filterText = ""
-    filterField.text = ""
+    if (procTab && procTab.clearFilterField) procTab.clearFilterField()
     rebuildProcs()
     stopFiltering()
   }
 
-  // ---- terminate (SIGTERM) with confirmation ---------------------------------
+  // ---- signals to processes -----------------------------------------------------
+  // Terminate / Kill ask first; Pause / Resume are reversible so they just go.
   property bool confirmOpen: false
   property var confirmTarget: null
+  property string confirmSignal: "TERM"
 
-  function requestTerminate() {
-    if (tabKey !== "proc" || !cursorActive || procIndex < 0 || procIndex >= sortedProcs.length) return
-    confirmTarget = sortedProcs[procIndex]
+  readonly property var signalVerbs: ({ TERM: "Terminate", KILL: "Kill", STOP: "Pause", CONT: "Resume" })
+
+  function requestSignal(proc, sig) {
+    if (!proc) return
+    if (sig === "STOP" || sig === "CONT") { sendSignal(proc.pid, sig); return }
+    confirmTarget = proc
+    confirmSignal = sig
     confirmOpen = true
     Qt.callLater(function() { confirmKeys.forceActiveFocus() })
   }
 
-  function cancelTerminate() {
+  function requestTerminateCursor() {
+    if (tabKey !== "proc" || !cursorActive || procIndex < 0 || procIndex >= sortedProcs.length) return
+    requestSignal(sortedProcs[procIndex], "TERM")
+  }
+
+  function cancelSignal() {
     confirmOpen = false
     confirmTarget = null
     Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
   }
 
-  function confirmTerminate() {
-    if (confirmTarget) {
-      killProc.command = ["kill", "-TERM", String(confirmTarget.pid)]
-      killProc.running = true
-    }
-    cancelTerminate()
+  function confirmSignalNow() {
+    if (confirmTarget) sendSignal(confirmTarget.pid, confirmSignal)
+    cancelSignal()
   }
 
-  Process { id: killProc }
+  function sendSignal(pid, sig) {
+    signalProc.command = ["kill", "-" + sig, String(pid)]
+    signalProc.running = true
+  }
+
+  Process { id: signalProc }
 
   // ---- surface -----------------------------------------------------------------
   KeyboardPanel {
@@ -350,7 +388,7 @@ Panel {
     // the card breathe, and cap so it never runs off the screen.
     contentHeight: panel.fittedContentHeight(Math.max(column.implicitHeight, Style.space(430)), Style.space(760))
 
-    // Keys while the terminate confirmation is up.
+    // Keys while a Terminate / Kill confirmation is up.
     Item {
       id: confirmKeys
       anchors.fill: parent
@@ -358,20 +396,23 @@ Panel {
       z: 20
       Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
-        if (terminateConfirm.handleKey(event)) event.accepted = true
+        if (signalConfirm.handleKey(event)) event.accepted = true
       }
 
       ConfirmDialog {
-        id: terminateConfirm
+        id: signalConfirm
         anchors.fill: parent
         opened: root.confirmOpen
-        message: root.confirmTarget ? "Terminate " + root.confirmTarget.name + " (pid " + root.confirmTarget.pid + ")?" : ""
-        confirmText: "Terminate"
+        message: root.confirmTarget
+          ? root.signalVerbs[root.confirmSignal] + " " + root.confirmTarget.name + " (pid " + root.confirmTarget.pid + ")?"
+            + (root.confirmSignal === "KILL" ? "\nSIGKILL cannot be caught — unsaved work is lost." : "")
+          : ""
+        confirmText: root.signalVerbs[root.confirmSignal] || "Confirm"
         background: Color.popups.background
         foreground: root.foreground
         fontFamily: root.fontFamily
-        onCanceled: root.cancelTerminate()
-        onConfirmed: root.confirmTerminate()
+        onCanceled: root.cancelSignal()
+        onConfirmed: root.confirmSignalNow()
       }
     }
 
@@ -389,11 +430,13 @@ Panel {
                                                 Math.max(0, panelFlick.contentHeight - panelFlick.height))
         }
       }
+      onActivateRequested: root.activateCursor()
       onCloseRequested: {
-        if (root.filterText !== "") root.clearFilter()
+        if (root.selectedPid >= 0) root.selectedPid = -1
+        else if (root.filterText !== "") root.clearFilter()
         else root.close()
       }
-      onDeleteRequested: root.requestTerminate()
+      onDeleteRequested: root.requestTerminateCursor()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         var n = parseInt(t, 10)
@@ -531,712 +574,805 @@ Panel {
 
           PanelSeparator { foreground: root.foreground }
 
-          // ======================================================= CPU
-          Column {
-            visible: root.tabKey === "cpu"
-            width: parent.width
-            spacing: Style.space(10)
+          // ---------- Tab bodies: only the selected one is instantiated ----------
+          Loader { width: parent.width; active: root.tabKey === "cpu"; visible: active; sourceComponent: cpuTab }
+          Loader { width: parent.width; active: root.tabKey === "mem"; visible: active; sourceComponent: memTab }
+          Loader { width: parent.width; active: root.tabKey === "disk"; visible: active; sourceComponent: diskTab }
+          Loader { width: parent.width; active: root.tabKey === "net"; visible: active; sourceComponent: netTab }
+          Loader { width: parent.width; active: root.tabKey === "gpu"; visible: active; sourceComponent: gpuTab }
+          Loader { id: procLoader; width: parent.width; active: root.tabKey === "proc"; visible: active; sourceComponent: procTabComponent }
+        }
+      }
+    }
+  }
 
-            SectionRow {
-              label: root.cpu ? root.cpu.model : "CPU"
-              value: root.cpu ? [Model.mhz(root.cpu.freq_mhz), Model.temp(root.cpu.temp)].filter(function(s) { return s !== "—" }).join("  ·  ") : ""
-              valueDim: true
-            }
+  // ======================================================= CPU
+  Component {
+    id: cpuTab
 
-            Meter { value: root.cpu ? root.cpu.total / 100 : 0 }
+    Column {
+      spacing: Style.space(10)
 
-            Sparkline {
-              width: parent.width
-              height: Style.space(56)
-              values: root.cpuHistory
-              maxValue: 100
-            }
+      SectionRow {
+        label: root.cpu ? root.cpu.model : "CPU"
+        value: root.cpu ? [Model.mhz(root.cpu.freq_mhz), Model.temp(root.cpu.temp)].filter(function(s) { return s !== "—" }).join("  ·  ") : ""
+        valueDim: true
+      }
 
-            PanelSectionHeader {
-              text: "CORES"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
+      Meter { value: root.cpu ? root.cpu.total / 100 : 0 }
 
-            Grid {
-              id: coreGrid
-              width: parent.width
-              readonly property int coreCount: root.cpu ? root.cpu.cores.length : 0
-              columns: coreCount > 32 ? 4 : (coreCount > 12 ? 2 : 1)
-              columnSpacing: Style.space(20)
-              rowSpacing: Style.space(4)
-              readonly property real cellWidth: (width - columnSpacing * (columns - 1)) / columns
+      Sparkline {
+        width: parent.width
+        height: Style.space(56)
+        values: root.cpuHistory
+        maxValue: 100
+      }
 
-              Repeater {
-                model: coreGrid.coreCount
+      PanelSectionHeader {
+        text: "CORES"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
 
-                Item {
-                  required property int index
-                  width: coreGrid.cellWidth
-                  implicitHeight: coreLabel.implicitHeight + Style.space(4)
+      Grid {
+        id: coreGrid
+        width: parent.width
+        readonly property int coreCount: root.cpu ? root.cpu.cores.length : 0
+        columns: coreCount > 32 ? 4 : (coreCount > 12 ? 2 : 1)
+        columnSpacing: Style.space(20)
+        rowSpacing: Style.space(4)
+        readonly property real cellWidth: (width - columnSpacing * (columns - 1)) / columns
 
-                  readonly property real load: root.cpu ? root.cpu.cores[index] : 0
-                  readonly property bool hasTemp: root.cpu && root.cpu.core_temps && root.cpu.core_temps.length === root.cpu.cores.length
-                  readonly property var coreTemp: hasTemp ? root.cpu.core_temps[index] : null
+        Repeater {
+          model: coreGrid.coreCount
 
-                  Text {
-                    id: coreLabel
-                    text: "C" + index
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(28)
-                  }
+          Item {
+            required property int index
+            width: coreGrid.cellWidth
+            implicitHeight: coreLabel.implicitHeight + Style.space(4)
 
-                  Rectangle {
-                    id: coreTrack
-                    anchors.left: coreLabel.right
-                    anchors.right: coreValue.left
-                    anchors.rightMargin: Style.space(10)
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
-                    radius: height / 2
-                    color: root.track
-
-                    Rectangle {
-                      anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      height: parent.height
-                      radius: parent.radius
-                      width: parent.width * root.clamp(load / 100, 0, 1)
-                      color: root.alpha(root.foreground, 0.7)
-                      Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
-                    }
-                  }
-
-                  Text {
-                    id: coreValue
-                    text: Model.percent(load) + (hasTemp ? "  " + (coreTemp === null ? "   " : Model.temp(coreTemp)) : "")
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    horizontalAlignment: Text.AlignRight
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: hasTemp ? Style.space(76) : Style.space(36)
-                  }
-                }
-              }
-            }
-
-            PanelSeparator { foreground: root.foreground }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(20)
-
-              Column {
-                width: (parent.width - parent.spacing) / 2
-                spacing: Style.spacing.labelGap
-                InfoPair { label: "Load average"; value: root.snapshot ? Model.loadAvg(root.snapshot.load) : "—" }
-                InfoPair { label: "Processes"; value: root.snapshot ? Model.count(root.snapshot.procs.total) : "—" }
-                InfoPair { label: "Frequency"; value: root.cpu ? Model.mhz(root.cpu.freq_mhz) : "—" }
-                InfoPair {
-                  visible: root.cpu && root.cpu.power_w !== null && root.cpu.power_w !== undefined
-                  label: "Package power"; value: root.cpu ? Model.watts(root.cpu.power_w) : "—"
-                }
-              }
-
-              Column {
-                width: (parent.width - parent.spacing) / 2
-                spacing: Style.spacing.labelGap
-                InfoPair { label: "Uptime"; value: root.snapshot ? Model.uptime(root.snapshot.uptime) : "—" }
-                InfoPair { label: "Threads"; value: root.snapshot ? Model.count(root.snapshot.procs.threads) : "—" }
-                InfoPair { label: "Temperature"; value: root.cpu ? Model.temp(root.cpu.temp) : "—" }
-                InfoPair {
-                  visible: root.cpu && root.cpu.fans && root.cpu.fans.length > 0
-                  label: root.cpu && root.cpu.fans && root.cpu.fans.length > 1 ? "Fans" : "Fan"
-                  value: {
-                    if (!root.cpu || !root.cpu.fans) return "—"
-                    var spinning = root.cpu.fans.filter(function(f) { return f.rpm > 0 })
-                    if (spinning.length === 0) return "idle"
-                    return spinning.map(function(f) { return f.rpm + " rpm" }).join(" · ")
-                  }
-                }
-              }
-            }
-          }
-
-          // ======================================================= Memory
-          Column {
-            visible: root.tabKey === "mem"
-            width: parent.width
-            spacing: Style.space(10)
-
-            SectionRow {
-              label: "Memory"
-              value: root.mem ? Model.bytes(root.mem.used) + " of " + Model.bytes(root.mem.total) : ""
-              valueDim: true
-            }
-
-            Meter { value: root.mem && root.mem.total > 0 ? root.mem.used / root.mem.total : 0 }
-
-            Sparkline {
-              width: parent.width
-              height: Style.space(56)
-              values: root.memHistory
-              maxValue: 100
-            }
-
-            Column {
-              width: parent.width
-              spacing: Style.space(6)
-
-              ShareRow { label: "Used"; amount: root.mem ? root.mem.used : 0; total: root.mem ? root.mem.total : 1; strong: true }
-              ShareRow { label: "Available"; amount: root.mem ? root.mem.available : 0; total: root.mem ? root.mem.total : 1 }
-              ShareRow { label: "Cached"; amount: root.mem ? root.mem.cached : 0; total: root.mem ? root.mem.total : 1 }
-              ShareRow { label: "Buffers"; amount: root.mem ? root.mem.buffers : 0; total: root.mem ? root.mem.total : 1 }
-              ShareRow { label: "Free"; amount: root.mem ? root.mem.free : 0; total: root.mem ? root.mem.total : 1 }
-            }
-
-            PanelSeparator { foreground: root.foreground }
-
-            PanelSectionHeader {
-              text: {
-                var devs = root.mem && root.mem.swap_devices ? root.mem.swap_devices : []
-                var zram = devs.some(function(d) { return String(d.name).indexOf("zram") >= 0 })
-                return zram ? "SWAP · ZRAM" : "SWAP"
-              }
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            SectionRow {
-              visible: root.mem && root.mem.swap_total > 0
-              label: root.mem && root.mem.swap_total > 0 ? Model.percent(root.mem.swap_used * 100 / root.mem.swap_total) + " used" : ""
-              value: root.mem ? Model.bytes(root.mem.swap_used) + " of " + Model.bytes(root.mem.swap_total) : ""
-              valueDim: true
-            }
-
-            Meter {
-              visible: root.mem && root.mem.swap_total > 0
-              value: root.mem && root.mem.swap_total > 0 ? root.mem.swap_used / root.mem.swap_total : 0
-            }
+            readonly property real load: root.cpu ? root.cpu.cores[index] : 0
+            readonly property bool hasTemp: root.cpu && root.cpu.core_temps && root.cpu.core_temps.length === root.cpu.cores.length
+            readonly property var coreTemp: hasTemp ? root.cpu.core_temps[index] : null
 
             Text {
-              visible: !root.mem || root.mem.swap_total <= 0
-              text: "No swap configured"
+              id: coreLabel
+              text: "C" + index
               color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-          }
-
-          // ======================================================= Disks
-          Column {
-            visible: root.tabKey === "disk"
-            width: parent.width
-            spacing: Style.space(12)
-
-            Text {
-              visible: root.hasData && root.disks.length === 0
-              text: "No mounted filesystems found"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.caption
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(28)
             }
 
-            Repeater {
-              model: root.disks
+            Rectangle {
+              anchors.left: coreLabel.right
+              anchors.right: coreValue.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
+              radius: height / 2
+              color: root.track
 
-              Column {
-                required property var modelData
-                required property int index
-                width: parent.width
-                spacing: Style.space(6)
-
-                readonly property real fraction: modelData.total > 0 ? modelData.used / modelData.total : 0
-                readonly property bool hasIo: modelData.read_bps !== null && modelData.read_bps !== undefined
-
-                PanelSeparator { visible: index > 0; foreground: root.foreground }
-
-                Item {
-                  width: parent.width
-                  implicitHeight: Math.max(diskName.implicitHeight, diskPct.implicitHeight)
-
-                  Row {
-                    id: diskName
-                    anchors.left: parent.left
-                    anchors.right: diskPct.left
-                    anchors.rightMargin: Style.space(10)
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(8)
-
-                    Text {
-                      text: Model.mountLabel(modelData.mount)
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      anchors.verticalCenter: parent.verticalCenter
-                    }
-                    Text {
-                      text: Model.fsLabel(modelData)
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      anchors.verticalCenter: parent.verticalCenter
-                      elide: Text.ElideRight
-                    }
-                  }
-
-                  Text {
-                    id: diskPct
-                    text: Model.percent(fraction * 100)
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                }
-
-                Meter { value: fraction }
-
-                Item {
-                  width: parent.width
-                  implicitHeight: Math.max(diskUsage.implicitHeight, diskIo.implicitHeight)
-
-                  Text {
-                    id: diskUsage
-                    text: Model.bytes(modelData.used) + " used  ·  " + Model.bytes(modelData.free) + " free of " + Model.bytes(modelData.total)
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.left: parent.left
-                    anchors.right: diskIo.left
-                    anchors.rightMargin: Style.space(10)
-                    anchors.verticalCenter: parent.verticalCenter
-                    elide: Text.ElideRight
-                  }
-
-                  Text {
-                    id: diskIo
-                    visible: hasIo
-                    text: hasIo ? "read " + Model.rate(modelData.read_bps) + "   ·   write " + Model.rate(modelData.write_bps) : ""
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                }
-
-                Text {
-                  visible: modelData.mounts && modelData.mounts.length > 0
-                  width: parent.width
-                  text: modelData.mounts && modelData.mounts.length > 0 ? "also " + modelData.mounts.join(", ") : ""
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
-                }
-              }
-            }
-
-            PanelSeparator {
-              visible: root.snapshot && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
-              foreground: root.foreground
-            }
-
-            InfoPair {
-              visible: root.snapshot && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
-              label: "Drive temperature"
-              value: root.snapshot ? Model.temp(root.snapshot.nvme_temp) : "—"
-            }
-          }
-
-          // ======================================================= Network
-          Column {
-            visible: root.tabKey === "net"
-            width: parent.width
-            spacing: Style.space(10)
-
-            Text {
-              visible: root.hasData && root.ifaces.length === 0
-              text: "No network interfaces found"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            // Interface picker, only when there is a choice to make.
-            Row {
-              id: ifaceRow
-              visible: root.ifaces.length > 1
-              width: parent.width
-              spacing: Style.space(6)
-
-              readonly property int count: Math.min(root.ifaces.length, 5)
-              readonly property real cellWidth: count > 0 ? (width - spacing * (count - 1)) / count : 0
-
-              Repeater {
-                model: root.ifaces.slice(0, 5)
-
-                Button {
-                  required property var modelData
-                  width: ifaceRow.cellWidth
-                  text: modelData.name
-                  fontSize: Style.font.caption
-                  foreground: modelData.up ? root.foreground : root.dim
-                  fontFamily: root.fontFamily
-                  horizontalPadding: Style.space(4)
-                  verticalPadding: Style.spacing.controlPaddingY
-                  bordered: true
-                  active: root.iface && root.iface.name === modelData.name
-                  onClicked: root.selectIface(modelData.name)
-                }
-              }
-            }
-
-            SectionRow {
-              visible: !!root.iface
-              label: root.iface ? (root.iface.ssid || root.iface.name) : ""
-              value: {
-                if (!root.iface) return ""
-                var bits = []
-                if (root.iface.ssid) bits.push(root.iface.name)
-                if (root.iface.ip) bits.push(root.iface.ip)
-                if (!root.iface.up) bits.push("down")
-                return bits.join("  ·  ")
-              }
-              valueDim: true
-            }
-
-            Row {
-              visible: !!root.iface
-              width: parent.width
-              spacing: 0
-              readonly property real cellWidth: width / 4
-
-              StatCell { width: parent.cellWidth; caption: "RECEIVING"; value: root.iface ? Model.rate(root.iface.rx_bps) : "—" }
-              StatCell { width: parent.cellWidth; caption: "SENDING"; value: root.iface ? Model.rate(root.iface.tx_bps) : "—" }
-              StatCell { width: parent.cellWidth; caption: "DOWNLOADED"; value: root.iface ? Model.bytes(root.iface.rx_total) : "—" }
-              StatCell { width: parent.cellWidth; caption: "UPLOADED"; value: root.iface ? Model.bytes(root.iface.tx_total) : "—" }
-            }
-
-            Sparkline {
-              visible: !!root.iface
-              width: parent.width
-              height: Style.space(72)
-              values: root.rxHistory
-              values2: root.txHistory
-              maxValue: 0
-            }
-
-            Item {
-              visible: !!root.iface
-              width: parent.width
-              implicitHeight: legendLeft.implicitHeight
-
-              Row {
-                id: legendLeft
-                spacing: Style.space(14)
+              Rectangle {
                 anchors.left: parent.left
-
-                Row {
-                  spacing: Style.space(6)
-                  Rectangle { width: Style.space(10); height: 2; radius: 1; color: root.foreground; anchors.verticalCenter: parent.verticalCenter }
-                  Text { text: "download"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-                }
-                Row {
-                  spacing: Style.space(6)
-                  Rectangle { width: Style.space(10); height: 2; radius: 1; color: root.alpha(root.foreground, 0.45); anchors.verticalCenter: parent.verticalCenter }
-                  Text { text: "upload"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-                }
+                anchors.verticalCenter: parent.verticalCenter
+                height: parent.height
+                radius: parent.radius
+                width: parent.width * root.clamp(load / 100, 0, 1)
+                color: root.alpha(root.foreground, 0.7)
+                Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
               }
+            }
+
+            Text {
+              id: coreValue
+              text: Model.percent(load) + (hasTemp ? "  " + (coreTemp === null ? "   " : Model.temp(coreTemp)) : "")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignRight
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              width: hasTemp ? Style.space(76) : Style.space(36)
+            }
+          }
+        }
+      }
+
+      PanelSeparator { foreground: root.foreground }
+
+      Row {
+        width: parent.width
+        spacing: Style.space(20)
+
+        Column {
+          width: (parent.width - parent.spacing) / 2
+          spacing: Style.spacing.labelGap
+          InfoPair { label: "Load average"; value: root.snapshot ? Model.loadAvg(root.snapshot.load) : "—" }
+          InfoPair { label: "Processes"; value: root.snapshot ? Model.count(root.snapshot.procs.total) : "—" }
+          InfoPair { label: "Frequency"; value: root.cpu ? Model.mhz(root.cpu.freq_mhz) : "—" }
+          InfoPair {
+            visible: root.cpu && root.cpu.power_w !== null && root.cpu.power_w !== undefined
+            label: "Package power"; value: root.cpu ? Model.watts(root.cpu.power_w) : "—"
+          }
+        }
+
+        Column {
+          width: (parent.width - parent.spacing) / 2
+          spacing: Style.spacing.labelGap
+          InfoPair { label: "Uptime"; value: root.snapshot ? Model.uptime(root.snapshot.uptime) : "—" }
+          InfoPair { label: "Threads"; value: root.snapshot ? Model.count(root.snapshot.procs.threads) : "—" }
+          InfoPair { label: "Temperature"; value: root.cpu ? Model.temp(root.cpu.temp) : "—" }
+          InfoPair {
+            visible: root.cpu && root.cpu.fans && root.cpu.fans.length > 0
+            label: root.cpu && root.cpu.fans && root.cpu.fans.length > 1 ? "Fans" : "Fan"
+            value: {
+              if (!root.cpu || !root.cpu.fans) return "—"
+              var spinning = root.cpu.fans.filter(function(f) { return f.rpm > 0 })
+              if (spinning.length === 0) return "idle"
+              return spinning.map(function(f) { return f.rpm + " rpm" }).join(" · ")
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ======================================================= Memory
+  Component {
+    id: memTab
+
+    Column {
+      spacing: Style.space(10)
+
+      SectionRow {
+        label: "Memory"
+        value: root.mem ? Model.bytes(root.mem.used) + " of " + Model.bytes(root.mem.total) : ""
+        valueDim: true
+      }
+
+      Meter { value: root.mem && root.mem.total > 0 ? root.mem.used / root.mem.total : 0 }
+
+      Sparkline {
+        width: parent.width
+        height: Style.space(56)
+        values: root.memHistory
+        maxValue: 100
+      }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(6)
+
+        ShareRow { label: "Used"; amount: root.mem ? root.mem.used : 0; total: root.mem ? root.mem.total : 1; strong: true }
+        ShareRow { label: "Available"; amount: root.mem ? root.mem.available : 0; total: root.mem ? root.mem.total : 1 }
+        ShareRow { label: "Cached"; amount: root.mem ? root.mem.cached : 0; total: root.mem ? root.mem.total : 1 }
+        ShareRow { label: "Buffers"; amount: root.mem ? root.mem.buffers : 0; total: root.mem ? root.mem.total : 1 }
+        ShareRow { label: "Free"; amount: root.mem ? root.mem.free : 0; total: root.mem ? root.mem.total : 1 }
+      }
+
+      PanelSeparator { foreground: root.foreground }
+
+      PanelSectionHeader {
+        text: {
+          var devs = root.mem && root.mem.swap_devices ? root.mem.swap_devices : []
+          var zram = devs.some(function(d) { return String(d.name).indexOf("zram") >= 0 })
+          return zram ? "SWAP · ZRAM" : "SWAP"
+        }
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
+      SectionRow {
+        visible: root.mem && root.mem.swap_total > 0
+        label: root.mem && root.mem.swap_total > 0 ? Model.percent(root.mem.swap_used * 100 / root.mem.swap_total) + " used" : ""
+        value: root.mem ? Model.bytes(root.mem.swap_used) + " of " + Model.bytes(root.mem.swap_total) : ""
+        valueDim: true
+      }
+
+      Meter {
+        visible: root.mem && root.mem.swap_total > 0
+        value: root.mem && root.mem.swap_total > 0 ? root.mem.swap_used / root.mem.swap_total : 0
+      }
+
+      Text {
+        visible: !root.mem || root.mem.swap_total <= 0
+        text: "No swap configured"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+  }
+
+  // ======================================================= Disks
+  Component {
+    id: diskTab
+
+    Column {
+      spacing: Style.space(12)
+
+      Text {
+        visible: root.hasData && root.disks.length === 0
+        text: "No mounted filesystems found"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Repeater {
+        model: root.disks
+
+        Column {
+          required property var modelData
+          required property int index
+          width: parent.width
+          spacing: Style.space(6)
+
+          readonly property real fraction: modelData.total > 0 ? modelData.used / modelData.total : 0
+          readonly property bool hasIo: modelData.read_bps !== null && modelData.read_bps !== undefined
+
+          PanelSeparator { visible: index > 0; foreground: root.foreground }
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(diskName.implicitHeight, diskPct.implicitHeight)
+
+            Row {
+              id: diskName
+              anchors.left: parent.left
+              anchors.right: diskPct.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(8)
 
               Text {
-                anchors.right: parent.right
-                text: "peak " + Model.rate(Math.max(Model.maxOf(root.rxHistory, 0), Model.maxOf(root.txHistory, 0)))
+                text: Model.mountLabel(modelData.mount)
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                anchors.verticalCenter: parent.verticalCenter
+              }
+              Text {
+                text: Model.fsLabel(modelData)
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideRight
               }
             }
 
-            PanelSeparator { visible: root.ifaces.length > 1; foreground: root.foreground }
-
-            // The other interfaces at a glance.
-            Column {
-              visible: root.ifaces.length > 1
-              width: parent.width
-              spacing: Style.spacing.labelGap
-
-              Repeater {
-                model: root.ifaces
-
-                Item {
-                  required property var modelData
-                  visible: !root.iface || modelData.name !== root.iface.name
-                  width: parent.width
-                  implicitHeight: visible ? otherName.implicitHeight : 0
-
-                  Text {
-                    id: otherName
-                    text: modelData.name + (modelData.ip ? "  " + modelData.ip : "")
-                    color: modelData.up ? root.foreground : root.dim
-                    opacity: modelData.up ? 0.75 : 1
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                  Text {
-                    text: modelData.up ? "󰇚 " + Model.rate(modelData.rx_bps) + "   󰕒 " + Model.rate(modelData.tx_bps) : "down"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                }
-              }
+            Text {
+              id: diskPct
+              text: Model.percent(fraction * 100)
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
             }
           }
 
-          // ======================================================= GPU
-          Column {
-            visible: root.tabKey === "gpu"
+          Meter { value: fraction }
+
+          Item {
             width: parent.width
-            spacing: Style.space(12)
+            implicitHeight: Math.max(diskUsage.implicitHeight, diskIo.implicitHeight)
 
             Text {
-              visible: root.hasData && root.gpus.length === 0
-              text: "No GPU detected"
+              id: diskUsage
+              text: Model.bytes(modelData.used) + " used  ·  " + Model.bytes(modelData.free) + " free of " + Model.bytes(modelData.total)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.left: parent.left
+              anchors.right: diskIo.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+            }
+
+            Text {
+              id: diskIo
+              visible: hasIo
+              text: hasIo ? "read " + Model.rate(modelData.read_bps) + "   ·   write " + Model.rate(modelData.write_bps) : ""
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          Text {
+            visible: modelData.mounts && modelData.mounts.length > 0
+            width: parent.width
+            text: modelData.mounts && modelData.mounts.length > 0 ? "also " + modelData.mounts.join(", ") : ""
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+      }
+
+      PanelSeparator {
+        visible: root.snapshot && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
+        foreground: root.foreground
+      }
+
+      InfoPair {
+        visible: root.snapshot && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
+        label: "Drive temperature"
+        value: root.snapshot ? Model.temp(root.snapshot.nvme_temp) : "—"
+      }
+    }
+  }
+
+  // ======================================================= Network
+  Component {
+    id: netTab
+
+    Column {
+      spacing: Style.space(10)
+
+      Text {
+        visible: root.hasData && root.ifaces.length === 0
+        text: "No network interfaces found"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      // Interface picker, only when there is a choice to make.
+      Row {
+        id: ifaceRow
+        visible: root.ifaces.length > 1
+        width: parent.width
+        spacing: Style.space(6)
+
+        readonly property int count: Math.min(root.ifaces.length, 5)
+        readonly property real cellWidth: count > 0 ? (width - spacing * (count - 1)) / count : 0
+
+        Repeater {
+          model: root.ifaces.slice(0, 5)
+
+          Button {
+            required property var modelData
+            width: ifaceRow.cellWidth
+            text: modelData.name
+            fontSize: Style.font.caption
+            foreground: modelData.up ? root.foreground : root.dim
+            fontFamily: root.fontFamily
+            horizontalPadding: Style.space(4)
+            verticalPadding: Style.spacing.controlPaddingY
+            bordered: true
+            active: root.iface && root.iface.name === modelData.name
+            onClicked: root.selectIface(modelData.name)
+          }
+        }
+      }
+
+      SectionRow {
+        visible: !!root.iface
+        label: root.iface ? (root.iface.ssid || root.iface.name) : ""
+        value: {
+          if (!root.iface) return ""
+          var bits = []
+          if (root.iface.ssid) bits.push(root.iface.name)
+          if (root.iface.ip) bits.push(root.iface.ip)
+          if (!root.iface.up) bits.push("down")
+          return bits.join("  ·  ")
+        }
+        valueDim: true
+      }
+
+      Row {
+        visible: !!root.iface
+        width: parent.width
+        spacing: 0
+        readonly property real cellWidth: width / 4
+
+        StatCell { width: parent.cellWidth; caption: "RECEIVING"; value: root.iface ? Model.rate(root.iface.rx_bps) : "—" }
+        StatCell { width: parent.cellWidth; caption: "SENDING"; value: root.iface ? Model.rate(root.iface.tx_bps) : "—" }
+        StatCell { width: parent.cellWidth; caption: "DOWNLOADED"; value: root.iface ? Model.bytes(root.iface.rx_total) : "—" }
+        StatCell { width: parent.cellWidth; caption: "UPLOADED"; value: root.iface ? Model.bytes(root.iface.tx_total) : "—" }
+      }
+
+      Sparkline {
+        visible: !!root.iface
+        width: parent.width
+        height: Style.space(72)
+        values: root.rxHistory
+        values2: root.txHistory
+        maxValue: 0
+      }
+
+      Item {
+        visible: !!root.iface
+        width: parent.width
+        implicitHeight: legendLeft.implicitHeight
+
+        Row {
+          id: legendLeft
+          spacing: Style.space(14)
+          anchors.left: parent.left
+
+          Row {
+            spacing: Style.space(6)
+            Rectangle { width: Style.space(10); height: 2; radius: 1; color: root.foreground; anchors.verticalCenter: parent.verticalCenter }
+            Text { text: "download"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+          }
+          Row {
+            spacing: Style.space(6)
+            Rectangle { width: Style.space(10); height: 2; radius: 1; color: root.alpha(root.foreground, 0.45); anchors.verticalCenter: parent.verticalCenter }
+            Text { text: "upload"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+          }
+        }
+
+        Text {
+          anchors.right: parent.right
+          text: "peak " + Model.rate(Math.max(Model.maxOf(root.rxHistory, 0), Model.maxOf(root.txHistory, 0)))
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+
+      PanelSeparator { visible: root.ifaces.length > 1; foreground: root.foreground }
+
+      // The other interfaces at a glance.
+      Column {
+        visible: root.ifaces.length > 1
+        width: parent.width
+        spacing: Style.spacing.labelGap
+
+        Repeater {
+          model: root.ifaces
+
+          Item {
+            required property var modelData
+            visible: !root.iface || modelData.name !== root.iface.name
+            width: parent.width
+            implicitHeight: visible ? otherName.implicitHeight : 0
+
+            Text {
+              id: otherName
+              text: modelData.name + (modelData.ip ? "  " + modelData.ip : "")
+              color: modelData.up ? root.foreground : root.dim
+              opacity: modelData.up ? 0.75 : 1
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              text: modelData.up ? "󰇚 " + Model.rate(modelData.rx_bps) + "   󰕒 " + Model.rate(modelData.tx_bps) : "down"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ======================================================= GPU
+  Component {
+    id: gpuTab
+
+    Column {
+      spacing: Style.space(12)
+
+      Text {
+        visible: root.hasData && root.gpus.length === 0
+        text: "No GPU detected"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Repeater {
+        model: root.gpus
+
+        Column {
+          required property var modelData
+          required property int index
+          width: parent.width
+          spacing: Style.space(10)
+
+          readonly property bool hasBusy: modelData.busy !== null && modelData.busy !== undefined
+
+          PanelSeparator { visible: index > 0; foreground: root.foreground }
+
+          SectionRow {
+            label: modelData.name
+            value: hasBusy ? Model.percent(modelData.busy) : ""
+            valueDim: false
+          }
+
+          Meter { visible: hasBusy; value: hasBusy ? modelData.busy / 100 : 0 }
+
+          Sparkline {
+            visible: index === 0 && hasBusy
+            width: parent.width
+            height: Style.space(56)
+            values: root.gpuHistory
+            maxValue: 100
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(20)
+
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              InfoPair { visible: value !== "—"; label: "Frequency"; value: Model.mhz(modelData.freq_mhz) }
+              InfoPair { visible: value !== "—"; label: "Temperature"; value: Model.temp(modelData.temp) }
+              InfoPair {
+                visible: modelData.mem_total !== null && modelData.mem_total !== undefined && modelData.mem_total > 0
+                label: "Memory"; value: Model.bytes(modelData.mem_used) + " of " + Model.bytes(modelData.mem_total)
+              }
+            }
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              InfoPair { visible: value !== "—"; label: "Max frequency"; value: Model.mhz(modelData.max_freq_mhz) }
+              InfoPair { visible: value !== "—"; label: "Power"; value: Model.watts(modelData.power_w) }
+              InfoPair { visible: value !== "—"; label: "Vendor"; value: Model.gpuVendorLabel(modelData.vendor) || "—" }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ======================================================= Processes
+  Component {
+    id: procTabComponent
+
+    Column {
+      id: procTabRoot
+      spacing: Style.space(8)
+
+      function scrollTo(index) { procList.positionViewAtIndex(index, ListView.Contain) }
+      function focusFilter() { filterField.forceActiveFocus(); filterField.selectAll() }
+      function clearFilterField() { filterField.text = "" }
+
+      Component.onCompleted: filterField.text = root.filterText
+      Component.onDestruction: if (root.filtering) root.filtering = false
+
+      // Summary line + filter box.
+      Item {
+        width: parent.width
+        implicitHeight: Math.max(procSummary.implicitHeight, filterField.implicitHeight)
+
+        Text {
+          id: procSummary
+          text: root.snapshot
+            ? (root.filterText !== ""
+                ? Model.count(root.sortedProcs.length) + " OF " + Model.count(root.processes.length) + " PROCESSES"
+                : Model.count(root.snapshot.procs.total) + " PROCESSES  ·  " + Model.count(root.snapshot.procs.threads) + " THREADS")
+            : ""
+          color: root.faint
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          font.letterSpacing: 1
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+        }
+
+        TextField {
+          id: filterField
+          width: Style.space(170)
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          placeholderText: "Filter  ( / )"
+          foreground: root.foreground
+          font.family: root.fontFamily
+          onTextChanged: { if (text !== root.filterText) { root.filterText = text; root.procIndex = 0; root.rebuildProcs() } }
+          onActiveFocusChanged: root.filtering = activeFocus
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Escape) {
+              if (text !== "") root.clearFilter()
+              else root.stopFiltering()
+              event.accepted = true
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Down) {
+              root.stopFiltering()
+              root.cursorActive = true
+              event.accepted = true
+            }
+          }
+        }
+      }
+
+      // Column headers double as the sort controls: click to sort by
+      // that column, click again to flip the direction.
+      Item {
+        width: parent.width
+        implicitHeight: Style.space(20)
+
+        ColumnHeader { key: "name"; text: "Name"; anchors.left: parent.left; anchors.right: pidHeader.left; anchors.rightMargin: Style.space(8) }
+        ColumnHeader { id: pidHeader; key: "pid"; text: "PID"; alignRight: true; width: Style.space(58); anchors.right: userHeader.left; anchors.rightMargin: Style.space(8) }
+        ColumnHeader { id: userHeader; key: "user"; text: "User"; width: Style.space(70); anchors.right: memHeader.left; anchors.rightMargin: Style.space(8) }
+        ColumnHeader { id: memHeader; key: "mem"; text: "Mem"; alignRight: true; width: Style.space(58); anchors.right: cpuHeader.left; anchors.rightMargin: Style.space(8) }
+        ColumnHeader { id: cpuHeader; key: "cpu"; text: "CPU"; alignRight: true; width: Style.space(58); anchors.right: parent.right }
+      }
+
+      ListView {
+        id: procList
+        width: parent.width
+        height: Style.space(392)
+        clip: true
+        model: procModel
+        spacing: 0
+        boundsBehavior: Flickable.StopAtBounds
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        delegate: Item {
+          id: procRow
+          required property var model
+          required property int index
+          width: procList.width
+          height: Style.space(24) + (expanded ? detailBlock.implicitHeight + Style.space(10) : 0)
+
+          readonly property bool current: root.cursorActive && root.procIndex === index
+          readonly property bool expanded: root.selectedPid === procRow.model.pid
+          readonly property bool paused: procRow.model.state === "T" || procRow.model.state === "t"
+
+          Behavior on height { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+
+          Rectangle {
+            anchors.fill: parent
+            radius: Style.cornerRadius
+            color: procRow.expanded ? Style.selectedFillFor(root.foreground, Color.accent)
+                 : (procRow.current ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent")
+            Behavior on color { ColorAnimation { duration: 120 } }
+          }
+
+          // ---- the row itself
+          Item {
+            id: rowLine
+            width: parent.width
+            height: Style.space(24)
+
+            Text {
+              text: procRow.model.name
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: procRow.expanded
+              elide: Text.ElideRight
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(6)
+              anchors.right: cellPid.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: cellPid
+              text: procRow.model.pid
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignRight
+              width: Style.space(58)
+              anchors.right: cellUser.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: cellUser
+              text: procRow.model.user
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+              width: Style.space(70)
+              anchors.right: cellMem.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: cellMem
+              text: Model.bytesShort(procRow.model.mem)
+              color: root.sortKey === "mem" ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignRight
+              width: Style.space(58)
+              anchors.right: cellCpu.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              id: cellCpu
+              text: Model.percent(procRow.model.cpu, 1)
+              color: root.sortKey === "cpu" ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignRight
+              width: Style.space(58)
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
             }
 
-            Repeater {
-              model: root.gpus
-
-              Column {
-                required property var modelData
-                required property int index
-                width: parent.width
-                spacing: Style.space(10)
-
-                readonly property bool hasBusy: modelData.busy !== null && modelData.busy !== undefined
-
-                PanelSeparator { visible: index > 0; foreground: root.foreground }
-
-                SectionRow {
-                  label: modelData.name
-                  value: hasBusy ? Model.percent(modelData.busy) : ""
-                  valueDim: false
-                }
-
-                Meter { visible: hasBusy; value: hasBusy ? modelData.busy / 100 : 0 }
-
-                Sparkline {
-                  visible: index === 0 && hasBusy
-                  width: parent.width
-                  height: Style.space(56)
-                  values: root.gpuHistory
-                  maxValue: 100
-                }
-
-                Row {
-                  width: parent.width
-                  spacing: Style.space(20)
-
-                  Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: Style.spacing.labelGap
-                    InfoPair { visible: value !== "—"; label: "Frequency"; value: Model.mhz(modelData.freq_mhz) }
-                    InfoPair { visible: value !== "—"; label: "Temperature"; value: Model.temp(modelData.temp) }
-                    InfoPair {
-                      visible: modelData.mem_total !== null && modelData.mem_total !== undefined && modelData.mem_total > 0
-                      label: "Memory"; value: Model.bytes(modelData.mem_used) + " of " + Model.bytes(modelData.mem_total)
-                    }
-                  }
-                  Column {
-                    width: (parent.width - parent.spacing) / 2
-                    spacing: Style.spacing.labelGap
-                    InfoPair { visible: value !== "—"; label: "Max frequency"; value: Model.mhz(modelData.max_freq_mhz) }
-                    InfoPair { visible: value !== "—"; label: "Power"; value: Model.watts(modelData.power_w) }
-                    InfoPair { visible: value !== "—"; label: "Vendor"; value: Model.gpuVendorLabel(modelData.vendor) || "—" }
-                  }
-                }
+            MouseArea {
+              id: rowHover
+              anchors.fill: parent
+              hoverEnabled: true
+              acceptedButtons: Qt.LeftButton
+              cursorShape: Qt.PointingHandCursor
+              onPositionChanged: { root.cursorActive = true; root.procIndex = procRow.index }
+              onClicked: {
+                root.cursorActive = true
+                root.procIndex = procRow.index
+                root.toggleSelected(procRow.model.pid)
               }
+            }
+
+            PanelToolTip {
+              visible: rowHover.containsMouse && !procRow.expanded && procRow.model.cmd !== ""
+              text: procRow.model.cmd
+              fontFamily: root.fontFamily
             }
           }
 
-          // ======================================================= Processes
+          // ---- detail card: full command · facts · actions
           Column {
-            visible: root.tabKey === "proc"
-            width: parent.width
-            spacing: Style.space(8)
+            id: detailBlock
+            visible: procRow.expanded
+            anchors.top: rowLine.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            spacing: Style.space(6)
 
-            // Summary line + filter box.
-            Item {
+            Text {
               width: parent.width
-              implicitHeight: Math.max(procSummary.implicitHeight, filterField.implicitHeight)
-
-              Text {
-                id: procSummary
-                text: root.snapshot
-                  ? (root.filterText !== ""
-                      ? Model.count(root.sortedProcs.length) + " OF " + Model.count(root.processes.length) + " PROCESSES"
-                      : Model.count(root.snapshot.procs.total) + " PROCESSES  ·  " + Model.count(root.snapshot.procs.threads) + " THREADS")
-                  : ""
-                color: root.faint
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                font.letterSpacing: 1
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-              }
-
-              TextField {
-                id: filterField
-                width: Style.space(170)
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                placeholderText: "Filter  ( / )"
-                foreground: root.foreground
-                font.family: root.fontFamily
-                onTextChanged: { root.filterText = text; root.procIndex = 0; root.rebuildProcs() }
-                onActiveFocusChanged: root.filtering = activeFocus
-                Keys.onPressed: function(event) {
-                  if (event.key === Qt.Key_Escape) {
-                    if (text !== "") root.clearFilter()
-                    else root.stopFiltering()
-                    event.accepted = true
-                  } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Down) {
-                    root.stopFiltering()
-                    root.cursorActive = true
-                    event.accepted = true
-                  }
-                }
-              }
+              text: procRow.model.cmd !== "" ? procRow.model.cmd : "(kernel thread)"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WrapAnywhere
+              maximumLineCount: 3
+              elide: Text.ElideRight
             }
 
-            // Column headers double as the sort controls: click to sort by
-            // that column, click again to flip the direction.
-            Item {
+            Text {
               width: parent.width
-              implicitHeight: Style.space(20)
-
-              ColumnHeader { key: "name"; text: "Name"; anchors.left: parent.left; anchors.right: pidHeader.left; anchors.rightMargin: Style.space(8) }
-              ColumnHeader { id: pidHeader; key: "pid"; text: "PID"; alignRight: true; width: Style.space(58); anchors.right: userHeader.left; anchors.rightMargin: Style.space(8) }
-              ColumnHeader { id: userHeader; key: "user"; text: "User"; width: Style.space(70); anchors.right: memHeader.left; anchors.rightMargin: Style.space(8) }
-              ColumnHeader { id: memHeader; key: "mem"; text: "Mem"; alignRight: true; width: Style.space(58); anchors.right: cpuHeader.left; anchors.rightMargin: Style.space(8) }
-              ColumnHeader { id: cpuHeader; key: "cpu"; text: "CPU"; alignRight: true; width: Style.space(58); anchors.right: parent.right }
+              text: "PID " + procRow.model.pid + "  ·  parent " + procRow.model.ppid + "  ·  " + procRow.model.threads
+                + (procRow.model.threads === 1 ? " thread" : " threads") + "  ·  " + Model.bytes(procRow.model.mem)
+                + (procRow.paused ? "  ·  paused" : "")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
             }
 
-            ListView {
-              id: procList
-              width: parent.width
-              height: Style.space(392)
-              clip: true
-              model: procModel
-              spacing: 0
-              boundsBehavior: Flickable.StopAtBounds
-              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            Row {
+              spacing: Style.space(6)
+              topPadding: Style.space(2)
 
-              delegate: Item {
-                id: procRow
-                required property var model
-                required property int index
-                width: procList.width
-                height: Style.space(24)
-
-                readonly property bool current: root.cursorActive && root.procIndex === index
-
-                Rectangle {
-                  anchors.fill: parent
-                  radius: Style.cornerRadius
-                  color: procRow.current ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
-                }
-
-                Text {
-                  id: cellName
-                  text: procRow.model.name
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
-                  anchors.left: parent.left
-                  anchors.leftMargin: Style.space(6)
-                  anchors.right: cellPid.left
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-                Text {
-                  id: cellPid
-                  text: procRow.model.pid
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  horizontalAlignment: Text.AlignRight
-                  width: Style.space(58)
-                  anchors.right: cellUser.left
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-                Text {
-                  id: cellUser
-                  text: procRow.model.user
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
-                  width: Style.space(70)
-                  anchors.right: cellMem.left
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-                Text {
-                  id: cellMem
-                  text: Model.bytesShort(procRow.model.mem)
-                  color: root.sortKey === "mem" ? root.foreground : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  horizontalAlignment: Text.AlignRight
-                  width: Style.space(58)
-                  anchors.right: cellCpu.left
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-                Text {
-                  id: cellCpu
-                  text: Model.percent(procRow.model.cpu, 1)
-                  color: root.sortKey === "cpu" ? root.foreground : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  horizontalAlignment: Text.AlignRight
-                  width: Style.space(58)
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(6)
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-
-                MouseArea {
-                  id: rowHover
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  acceptedButtons: Qt.LeftButton
-                  onPositionChanged: { root.cursorActive = true; root.procIndex = procRow.index }
-                  onClicked: { root.cursorActive = true; root.procIndex = procRow.index }
-                }
-
-                PanelToolTip {
-                  visible: rowHover.containsMouse && procRow.model.cmd !== ""
-                  text: procRow.model.cmd + "\n" + procRow.model.threads + " threads  ·  x to terminate"
-                  fontFamily: root.fontFamily
-                }
+              ActionPill { text: "Terminate"; tooltipText: "Send SIGTERM — ask it to quit"; onClicked: root.requestSignal(procRow.model, "TERM") }
+              ActionPill { text: "Kill"; tooltipText: "Send SIGKILL — end it immediately"; onClicked: root.requestSignal(procRow.model, "KILL") }
+              ActionPill {
+                text: procRow.paused ? "Resume" : "Pause"
+                tooltipText: procRow.paused ? "Send SIGCONT" : "Send SIGSTOP — freeze it, resumable"
+                onClicked: root.requestSignal(procRow.model, procRow.paused ? "CONT" : "STOP")
               }
+              ActionPill { text: "Close"; tooltipText: "Collapse (Esc)"; onClicked: root.selectedPid = -1 }
             }
           }
         }
@@ -1245,6 +1381,16 @@ Panel {
   }
 
   // ------------------------------------------------------------- components
+
+  // Small bordered button for row actions.
+  component ActionPill: Button {
+    fontSize: Style.font.caption
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    horizontalPadding: Style.space(10)
+    verticalPadding: Style.space(3)
+    bordered: true
+  }
 
   // Label on the left, value on the right; the value optionally dimmed.
   component SectionRow: Item {

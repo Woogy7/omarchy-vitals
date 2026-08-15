@@ -602,8 +602,8 @@ class Procs:
                     name = base
             procs.append({
                 "pid": pid, "ppid": ppid, "name": name, "user": self.user(st.st_uid),
-                "cpu": round(cpu, 1), "mem": rss, "threads": nthreads,
-                "cmd": cmd[:160],
+                "cpu": round(cpu, 1), "mem": rss, "threads": nthreads, "state": state,
+                "cmd": cmd[:200],
             })
         # Forget stale pids.
         self.prev = cur
