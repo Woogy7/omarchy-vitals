@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.woogy7.vitals",
+  "name": "Vitals",
+  "version": "0.1.0",
+  "author": "Woogy7",
+  "license": "MIT",
+  "description": "A calm, tabbed system monitor: CPU, memory, disks, network, GPU and sortable processes in one Omarchy panel",
+  "homepage": "https://github.com/Woogy7/omarchy-vitals",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Vitals",
+    "description": "Chip icon in the bar; click for a btop-style system monitor with tabs for CPU, memory, disks, network, GPU and processes",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshSeconds": 2
+    },
+    "schema": [
+      { "key": "refreshSeconds", "type": "integer", "label": "Refresh interval (seconds)", "min": 1, "max": 10, "step": 1, "defaultValue": 2 }
+    ]
+  }
+}
