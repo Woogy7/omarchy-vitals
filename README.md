@@ -5,7 +5,13 @@ One chip icon in the bar; one panel with tabs for **CPU · Memory · Disks ·
 Network · GPU · Processes**. Same quiet look as the built-in battery and
 network panels — no boxes-in-boxes, no rainbow bars.
 
-![Vitals preview](preview.png)
+<p align="center"><img src="preview.png" alt="Vitals — CPU tab" width="520"></p>
+
+<p align="center">
+  <img src="docs/processes.png" alt="Processes tab" width="240">
+  <img src="docs/memory.png" alt="Memory tab" width="240">
+  <img src="docs/network.png" alt="Network tab" width="240">
+</p>
 
 ## What you get
 

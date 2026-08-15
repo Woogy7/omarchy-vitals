@@ -1226,7 +1226,8 @@ Panel {
       ListView {
         id: procList
         width: parent.width
-        height: Style.space(392)
+        // A whole number of rows, so the list never ends on a half-cut line.
+        height: Style.space(24) * 16
         clip: true
         model: procModel
         spacing: 0
