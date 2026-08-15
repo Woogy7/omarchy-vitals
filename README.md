@@ -19,7 +19,7 @@ network panels — no boxes-in-boxes, no rainbow bars.
 | **Processes** | sortable by name / pid / user / memory / cpu (click a column header, click again to flip), live filter, keyboard cursor; click a row (or Enter) to expand it — full command line, parent, threads, memory — with **Terminate · Kill · Pause/Resume** actions (Terminate/Kill ask first) |
 
 Data comes from a small Python collector (`collector.py`, standard library
-only, no root) that streams a JSON snapshot every 2 s **only while the panel is
+only, no root) that streams a JSON snapshot every second (configurable) **only while the panel is
 open**. Closed panel = zero background cost; open, the whole thing (collector +
 shell rendering) sits around 3–8 % of one core, in line with the built-in
 panels. Only the selected tab is instantiated, so hidden tabs cost nothing.
@@ -70,7 +70,7 @@ Keyboard, while the panel is open:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `refreshSeconds` | `2` | sampling interval, 1–10 s |
+| `refreshSeconds` | `1` | sampling interval, 1–10 s |
 
 ## Remove
 

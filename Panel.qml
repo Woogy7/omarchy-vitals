@@ -39,7 +39,7 @@ Panel {
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
 
   // ---- settings ------------------------------------------------------------
-  readonly property int refreshSeconds: clamp(Number(setting("refreshSeconds", 2)) || 2, 1, 10)
+  readonly property int refreshSeconds: clamp(Number(setting("refreshSeconds", 1)) || 1, 1, 10)
   readonly property int historyLength: 90
 
   // ---- open / close ---------------------------------------------------------

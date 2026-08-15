@@ -20,10 +20,10 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshSeconds": 2
+      "refreshSeconds": 1
     },
     "schema": [
-      { "key": "refreshSeconds", "type": "integer", "label": "Refresh interval (seconds)", "min": 1, "max": 10, "step": 1, "defaultValue": 2 }
+      { "key": "refreshSeconds", "type": "integer", "label": "Refresh interval (seconds)", "min": 1, "max": 10, "step": 1, "defaultValue": 1 }
     ]
   }
 }
