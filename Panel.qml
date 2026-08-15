@@ -662,7 +662,6 @@ Panel {
                 radius: parent.radius
                 width: parent.width * root.clamp(load / 100, 0, 1)
                 color: root.alpha(root.foreground, 0.7)
-                Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
               }
             }
 
@@ -1426,7 +1425,10 @@ Panel {
     }
   }
 
-  // Rounded track with a proportional fill.
+  // Rounded track with a proportional fill. Deliberately NOT animated: the
+  // panel is a full-screen layer surface, and a per-tick width animation
+  // forces it to re-render for ~300 ms of every second (~2.5% of a core);
+  // snapping costs ~0.4%. Interaction-only animations (hover, expand) stay.
   component Meter: Item {
     id: meter
     property real value: 0
@@ -1449,7 +1451,6 @@ Panel {
       radius: meterTrack.radius
       width: meterTrack.width * root.clamp(meter.value, 0, 1)
       color: root.foreground
-      Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
     }
   }
 
@@ -1493,7 +1494,6 @@ Panel {
         radius: parent.radius
         width: parent.width * root.clamp(shareRow.total > 0 ? shareRow.amount / shareRow.total : 0, 0, 1)
         color: shareRow.strong ? root.foreground : root.alpha(root.foreground, 0.55)
-        Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
       }
     }
 
