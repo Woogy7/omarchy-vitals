@@ -2,7 +2,7 @@
 
 A calm, btop-style system monitor for the [Omarchy](https://omarchy.org) shell.
 One chip icon in the bar; one panel with tabs for **CPU · Memory · Disks ·
-Network · GPU · Processes**. Same quiet look as the built-in battery and
+Network · GPU · Sensors · Processes**. Same quiet look as the built-in battery and
 network panels — no boxes-in-boxes, no rainbow bars.
 
 <p align="center"><img src="preview.png" alt="Vitals — CPU tab" width="520"></p>
@@ -17,11 +17,12 @@ network panels — no boxes-in-boxes, no rainbow bars.
 
 | Tab | Shows |
 |-----|-------|
-| **CPU** | model, frequency, package temperature, live usage meter and 3-minute history, one meter per core (with per-core temperature where the sensor is exposed), load average, uptime, process/thread counts, fans, package power (when readable) |
+| **CPU** | model, frequency, package temperature (with the peak seen so far), live usage meter and 3-minute history, one meter per core (with per-core temperature where the sensor is exposed), load average, uptime, process/thread counts, every fan by name, package power (when readable) |
 | **Memory** | used / available / cached / buffers / free with proportional bars, history, swap (zram-aware) |
-| **Disks** | one entry per real filesystem (btrfs subvolumes and bind mounts folded into their parent), used/free/total, read/write throughput, NVMe temperature |
+| **Disks** | one entry per real filesystem (btrfs subvolumes and bind mounts folded into their parent), used/free/total, read/write throughput, and the temperature of the physical drive behind each one, resolved through dm-crypt and partition layers, so an encrypted root reports its NVMe sensor |
 | **Network** | interface picker, receive/send rate, totals, dual-line history, the other interfaces at a glance |
-| **GPU** | Intel (i915/xe via sysfs), AMD (amdgpu sysfs) and NVIDIA (`nvidia-smi`) — busy %, clocks, temperature, power, VRAM where available; the tab hides itself if no GPU is found |
+| **GPU** | Intel (i915/xe via sysfs), AMD (amdgpu sysfs) and NVIDIA (`nvidia-smi`) — busy %, clocks, temperature, power, VRAM where available; the tab hides itself if no GPU is found. Integrated graphics have no sensor of their own, so they report the CPU package they share, labelled `Temperature (die)` rather than pretending to a probe they do not have |
+| **Sensors** | every usable temperature on the machine in one list (CPU package, chassis/skin, drive, Wi-Fi and platform zones), each with a bar scaled to its critical limit where one is known, the peak seen while the panel has been open, and that limit. Then every fan, by name, including the ones sitting idle. Sensors that read ~0 °C (unpopulated DPTF zones) and controller pseudo-zones are left out rather than shown as junk |
 | **Processes** | sortable by name / pid / user / memory / cpu (click a column header, click again to flip), live filter, keyboard cursor; click a row (or Enter) to expand it — full command line, parent, threads, memory — with **Terminate · Kill · Pause/Resume** actions (Terminate/Kill ask first) |
 
 Data comes from a small Python collector (`collector.py`, standard library
@@ -52,15 +53,15 @@ bindd = SUPER CTRL, V, Vitals, exec, omarchy-shell io.github.woogy7.vitals toggl
 bindd = SUPER CTRL SHIFT, V, Processes, exec, omarchy-shell io.github.woogy7.vitals showTab proc
 ```
 
-`showTab` accepts `cpu`, `mem`, `disk`, `net`, `gpu`, `proc` and opens the
-panel on that tab.
+`showTab` accepts `cpu`, `mem`, `disk`, `net`, `gpu`, `sensors`, `proc` and
+opens the panel on that tab.
 
 Keyboard, while the panel is open:
 
 | Key | Action |
 |-----|--------|
 | `←` `→` / `h` `l` | previous / next tab |
-| `1`–`6` | jump to a tab |
+| `1`–`7` | jump to a tab |
 | `↑` `↓` / `j` `k` | move the process cursor (scroll on other tabs) |
 | `g` / `G` | jump to the top / bottom of the process list |
 | `s` / `S` | next / previous sort column |

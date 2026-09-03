@@ -47,6 +47,12 @@ function mhz(v) {
   return v >= 1000 ? (v / 1000).toFixed(2) + " GHz" : Math.round(v) + " MHz"
 }
 
+function rpm(v) {
+  if (v === null || v === undefined || !isFinite(v)) return "—"
+  if (v <= 0) return "idle"
+  return count(Math.round(v)) + " rpm"
+}
+
 function watts(w) {
   if (w === null || w === undefined || !isFinite(w)) return "—"
   return (w < 10 ? w.toFixed(1) : String(Math.round(w))) + " W"

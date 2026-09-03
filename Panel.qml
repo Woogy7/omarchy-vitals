@@ -96,6 +96,30 @@ Panel {
   readonly property var gpus: snapshot ? (snapshot.gpus || []) : []
   readonly property var ifaces: snapshot && snapshot.net ? (snapshot.net.ifaces || []) : []
   readonly property var processes: snapshot ? (snapshot.processes || []) : []
+  readonly property var sensorTemps: snapshot && snapshot.sensors ? (snapshot.sensors.temps || []) : []
+  readonly property var sensorFans: snapshot && snapshot.sensors ? (snapshot.sensors.fans || []) : []
+
+  readonly property var hottest: {
+    var best = null
+    for (var i = 0; i < sensorTemps.length; i++) {
+      var s = sensorTemps[i]
+      if (s.temp === null || s.temp === undefined) continue
+      if (!best || s.temp > best.temp) best = s
+    }
+    return best
+  }
+
+  readonly property bool anyDiskTemp: {
+    for (var i = 0; i < disks.length; i++)
+      if (disks[i].temp !== null && disks[i].temp !== undefined) return true
+    return false
+  }
+
+  // High-water marks, kept for as long as the shell lives. The collector only
+  // runs while the panel is open, so these cover observed time, not all time.
+  property var sensorPeaks: ({})
+  property real cpuTempPeak: 0
+  property real gpuTempPeak: 0
 
   property var cpuHistory: []
   property var gpuHistory: []
@@ -128,7 +152,31 @@ Panel {
     var iface = currentIface(parsed.net ? (parsed.net.ifaces || []) : [])
     rxHistory = Model.pushHistory(rxHistory, iface ? iface.rx_bps : 0, historyLength)
     txHistory = Model.pushHistory(txHistory, iface ? iface.tx_bps : 0, historyLength)
+    trackPeaks(parsed)
     if (tabKey === "proc") rebuildProcs()
+  }
+
+  // Peaks are rebuilt into a fresh object so the binding actually fires;
+  // mutating in place keeps the same reference and updates nothing.
+  function trackPeaks(parsed) {
+    if (parsed.cpu && parsed.cpu.temp > cpuTempPeak) cpuTempPeak = parsed.cpu.temp
+    var g = parsed.gpus && parsed.gpus.length ? parsed.gpus[0] : null
+    if (g && g.temp > gpuTempPeak) gpuTempPeak = g.temp
+    var list = parsed.sensors ? (parsed.sensors.temps || []) : []
+    if (list.length === 0) return
+    var peaks = {}
+    for (var k in sensorPeaks) peaks[k] = sensorPeaks[k]
+    var changed = false
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i]
+      if (s.temp === null || s.temp === undefined) continue
+      if (!(s.key in peaks) || s.temp > peaks[s.key]) { peaks[s.key] = s.temp; changed = true }
+    }
+    if (changed) sensorPeaks = peaks
+  }
+
+  function peakFor(key) {
+    return (key in sensorPeaks) ? sensorPeaks[key] : null
   }
 
   // ---- tabs ------------------------------------------------------------------
@@ -140,6 +188,7 @@ Panel {
       { key: "net", label: "Network" }
     ]
     if (root.gpus.length > 0 || !root.hasData) t.push({ key: "gpu", label: "GPU" })
+    if (root.sensorTemps.length > 0 || root.sensorFans.length > 0 || !root.hasData) t.push({ key: "sensors", label: "Sensors" })
     t.push({ key: "proc", label: "Processes" })
     return t
   }
@@ -208,6 +257,10 @@ Panel {
       var g = snap.gpus && snap.gpus.length ? snap.gpus[0] : null
       return g && g.busy !== null && g.busy !== undefined ? Model.percent(g.busy) : "—"
     }
+    if (tabKey === "sensors") {
+      var hot = root.hottest
+      return hot ? Model.temp(hot.temp) : "—"
+    }
     if (tabKey === "proc") return Model.count(snap.processes ? snap.processes.length : 0)
     return "—"
   }
@@ -218,6 +271,10 @@ Panel {
     if (tabKey === "disk") return disks.length ? Model.mountLabel(disks[0].mount).toUpperCase() : "DISK"
     if (tabKey === "net") return "RECEIVING"
     if (tabKey === "gpu") return "GPU"
+    if (tabKey === "sensors") {
+      var hot = root.hottest
+      return hot ? hot.label.toUpperCase() : "SENSORS"
+    }
     if (tabKey === "proc") return "PROCESSES"
     return ""
   }
@@ -574,7 +631,10 @@ Panel {
 
                 width: tabRow.cellWidth
                 text: modelData.label
-                fontSize: Style.font.bodySmall
+                // Cells split the row evenly, so a seventh tab leaves the
+                // longest label ("Processes") with no breathing room. Drop a
+                // step in type rather than eliding or letting it touch the border.
+                fontSize: root.tabs.length > 6 ? Style.font.caption : Style.font.bodySmall
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 horizontalPadding: Style.space(4)
@@ -595,6 +655,7 @@ Panel {
           Loader { width: parent.width; active: root.tabKey === "disk"; visible: active; sourceComponent: diskTab }
           Loader { width: parent.width; active: root.tabKey === "net"; visible: active; sourceComponent: netTab }
           Loader { width: parent.width; active: root.tabKey === "gpu"; visible: active; sourceComponent: gpuTab }
+          Loader { width: parent.width; active: root.tabKey === "sensors"; visible: active; sourceComponent: sensorsTab }
           Loader { id: procLoader; width: parent.width; active: root.tabKey === "proc"; visible: active; sourceComponent: procTabComponent }
         }
       }
@@ -718,17 +779,29 @@ Panel {
           spacing: Style.spacing.labelGap
           InfoPair { label: "Uptime"; value: root.snapshot ? Model.uptime(root.snapshot.uptime) : "—" }
           InfoPair { label: "Threads"; value: root.snapshot ? Model.count(root.snapshot.procs.threads) : "—" }
-          InfoPair { label: "Temperature"; value: root.cpu ? Model.temp(root.cpu.temp) : "—" }
           InfoPair {
-            visible: root.cpu && root.cpu.fans && root.cpu.fans.length > 0
-            label: root.cpu && root.cpu.fans && root.cpu.fans.length > 1 ? "Fans" : "Fan"
+            label: "Temperature"
             value: {
-              if (!root.cpu || !root.cpu.fans) return "—"
-              var spinning = root.cpu.fans.filter(function(f) { return f.rpm > 0 })
-              if (spinning.length === 0) return "idle"
-              return spinning.map(function(f) { return f.rpm + " rpm" }).join(" · ")
+              if (!root.cpu) return "—"
+              var s = Model.temp(root.cpu.temp)
+              if (s === "—") return s
+              if (root.cpuTempPeak > root.cpu.temp + 0.5) s += "   peak " + Model.temp(root.cpuTempPeak)
+              return s
             }
           }
+        }
+      }
+
+      // Full width: fan names plus readings never fit a half-width column.
+      InfoPair {
+        visible: root.cpu && root.cpu.fans && root.cpu.fans.length > 0
+        label: root.cpu && root.cpu.fans && root.cpu.fans.length > 1 ? "Fans" : "Fan"
+        value: {
+          if (!root.cpu || !root.cpu.fans || root.cpu.fans.length === 0) return "—"
+          var many = root.cpu.fans.length > 1
+          return root.cpu.fans.map(function(f) {
+            return many ? f.label + " " + Model.rpm(f.rpm) : Model.rpm(f.rpm)
+          }).join("   ·   ")
         }
       }
     }
@@ -857,6 +930,15 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 elide: Text.ElideRight
               }
+              Text {
+                readonly property bool has: modelData.temp !== null && modelData.temp !== undefined
+                visible: has
+                text: has ? "·  " + Model.temp(modelData.temp) : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                anchors.verticalCenter: parent.verticalCenter
+              }
             }
 
             Text {
@@ -914,13 +996,15 @@ Panel {
         }
       }
 
+      // Only when no drive resolved a sensor of its own, so the reading is
+      // never shown twice.
       PanelSeparator {
-        visible: root.snapshot && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
+        visible: root.snapshot && !root.anyDiskTemp && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
         foreground: root.foreground
       }
 
       InfoPair {
-        visible: root.snapshot && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
+        visible: root.snapshot && !root.anyDiskTemp && root.snapshot.nvme_temp !== null && root.snapshot.nvme_temp !== undefined
         label: "Drive temperature"
         value: root.snapshot ? Model.temp(root.snapshot.nvme_temp) : "—"
       }
@@ -1130,7 +1214,18 @@ Panel {
               width: (parent.width - parent.spacing) / 2
               spacing: Style.spacing.labelGap
               InfoPair { visible: value !== "—"; label: "Frequency"; value: Model.mhz(modelData.freq_mhz) }
-              InfoPair { visible: value !== "—"; label: "Temperature"; value: Model.temp(modelData.temp) }
+              InfoPair {
+                visible: value !== "—"
+                // "(die)" because integrated graphics have no sensor of their
+                // own -- this is the CPU package reading they share.
+                label: modelData.temp_shared ? "Temperature (die)" : "Temperature"
+                value: {
+                  var s = Model.temp(modelData.temp)
+                  if (s === "—") return s
+                  if (root.gpuTempPeak > modelData.temp + 0.5) s += "  peak " + Model.temp(root.gpuTempPeak)
+                  return s
+                }
+              }
               InfoPair {
                 visible: modelData.mem_total !== null && modelData.mem_total !== undefined && modelData.mem_total > 0
                 label: "Memory"; value: Model.bytes(modelData.mem_used) + " of " + Model.bytes(modelData.mem_total)
@@ -1145,6 +1240,97 @@ Panel {
             }
           }
         }
+      }
+    }
+  }
+
+  // ======================================================= Sensors
+  Component {
+    id: sensorsTab
+
+    Column {
+      spacing: Style.space(10)
+
+      SectionRow {
+        label: "Sensors"
+        value: {
+          var t = root.sensorTemps.length, f = root.sensorFans.length
+          return t + (t === 1 ? " temperature" : " temperatures") + "  ·  " + f + (f === 1 ? " fan" : " fans")
+        }
+        valueDim: true
+      }
+
+      PanelSectionHeader {
+        text: "TEMPERATURES"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
+      Text {
+        visible: root.hasData && root.sensorTemps.length === 0
+        width: parent.width
+        text: "No usable temperature sensors"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Column {
+        width: parent.width
+
+        Repeater {
+          model: root.sensorTemps
+
+          SensorRow {
+            required property var modelData
+            label: modelData.label
+            value: modelData.temp
+            // Bars read as "how close to the limit" where a limit is known,
+            // and fall back to a plain 100 C scale where it is not.
+            scale: modelData.crit > 0 ? modelData.crit : 100
+            reading: Model.temp(modelData.temp)
+            trailing: {
+              var parts = []
+              var pk = root.peakFor(modelData.key)
+              if (pk !== null && pk > modelData.temp + 0.5) parts.push("peak " + Model.temp(pk))
+              if (modelData.crit > 0) parts.push("max " + Model.temp(modelData.crit))
+              return parts.join(" · ")
+            }
+          }
+        }
+      }
+
+      PanelSectionHeader {
+        visible: root.sensorFans.length > 0
+        text: "FANS"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
+      Column {
+        width: parent.width
+
+        Repeater {
+          model: root.sensorFans
+
+          SensorRow {
+            required property var modelData
+            label: modelData.label
+            value: modelData.rpm
+            scale: modelData.max_rpm > 0 ? modelData.max_rpm : 6000
+            reading: Model.rpm(modelData.rpm)
+            readingWidth: Style.space(76)
+          }
+        }
+      }
+
+      Text {
+        width: parent.width
+        text: "Peaks cover the time this panel has been open."
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
       }
     }
   }
@@ -1526,6 +1712,81 @@ Panel {
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(70)
+    }
+  }
+
+  // Label · bar · reading, with peak and limit trailing in caption grey.
+  // Same geometry and weights as ShareRow so the tabs read as one family.
+  component SensorRow: Item {
+    id: sensorRow
+    property string label: ""
+    property real value: 0
+    property real scale: 100
+    property string reading: ""
+    property string trailing: ""
+    // "56°C" and "2,707 rpm" need very different room; right-aligned text
+    // wider than its box spills left over the bar, so callers set this.
+    property real readingWidth: Style.space(48)
+
+    width: parent ? parent.width : implicitWidth
+    implicitHeight: Math.max(sensorLabel.implicitHeight, sensorReading.implicitHeight) + Style.spacing.sm
+
+    Text {
+      id: sensorLabel
+      text: sensorRow.label
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      elide: Text.ElideRight
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(112)
+    }
+
+    Rectangle {
+      anchors.left: sensorLabel.right
+      anchors.right: sensorReading.left
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
+      radius: height / 2
+      color: root.track
+
+      Rectangle {
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        height: parent.height
+        radius: parent.radius
+        width: parent.width * root.clamp(sensorRow.scale > 0 ? sensorRow.value / sensorRow.scale : 0, 0, 1)
+        color: root.alpha(root.foreground, 0.55)
+      }
+    }
+
+    Text {
+      id: sensorReading
+      text: sensorRow.reading
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      horizontalAlignment: Text.AlignRight
+      anchors.right: sensorTrailing.left
+      anchors.rightMargin: Style.space(12)
+      anchors.verticalCenter: parent.verticalCenter
+      width: sensorRow.readingWidth
+    }
+
+    Text {
+      id: sensorTrailing
+      text: sensorRow.trailing
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      horizontalAlignment: Text.AlignRight
+      elide: Text.ElideRight
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(158)
     }
   }
 

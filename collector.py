@@ -147,7 +147,7 @@ class Hwmon:
             label = read_str(base + "_label") or os.path.basename(base)
             v = read_int(f)
             if v is not None:
-                out.append({"label": label, "rpm": v})
+                out.append({"label": friendly_fan_label(read_str(d + "/name") or "", label), "rpm": v})
         return out
 
     def power_w(self, d):
@@ -158,6 +158,201 @@ class Hwmon:
             if v is not None:
                 return v / 1_000_000.0
         return None
+
+    def all_fans(self):
+        """Every fan on the box, not just the one device the CPU tab shows."""
+        out = []
+        for name, d in self.devices:
+            for f in sorted(glob.glob(d + "/fan*_input")):
+                base = f[:-6]
+                raw = read_str(base + "_label") or os.path.basename(base)
+                v = read_int(f)
+                if v is None or v < 0:
+                    continue
+                out.append({
+                    "key": name + "/" + os.path.basename(base),
+                    "label": friendly_fan_label(name, raw),
+                    "rpm": v,
+                    "max_rpm": read_int(base + "_max"),
+                })
+        return out
+
+    def all_temps(self):
+        """Every usable temperature on the box, grouped and labelled.
+
+        Per-core entries are left out on purpose: the CPU tab already draws
+        them as a grid, and twenty more rows would drown the sensors list.
+        Sensors reading ~0 C (unpopulated DPTF zones like SEN1..SEN8) and
+        DPTF controller pseudo-zones are dropped rather than shown as junk.
+        """
+        out = []
+        seen_devices = set()
+        for name, d in self.devices:
+            inputs = sorted(glob.glob(d + "/temp*_input"),
+                            key=lambda p: int(os.path.basename(p)[4:-6]))
+            labels = [read_str(f[:-6] + "_label") or os.path.basename(f[:-6]) for f in inputs]
+            multi = len(inputs) > 1
+            for f, raw in zip(inputs, labels):
+                if raw.lower().startswith("core "):
+                    continue
+                base = f[:-6]
+                v = read_int(f)
+                v = v / 1000.0 if v is not None else None
+                if not _sane_temp(v):
+                    continue
+                crit = read_int(base + "_crit")
+                high = read_int(base + "_max")
+                out.append({
+                    "key": name + "/" + os.path.basename(base),
+                    "label": friendly_temp_label(name, raw, multi),
+                    "group": temp_group(name),
+                    "temp": v,
+                    "crit": (crit / 1000.0) if crit and 1000 < crit < 200000 else None,
+                    "high": (high / 1000.0) if high and 1000 < high < 200000 else None,
+                })
+            seen_devices.add(name.lower())
+
+        # Thermal zones the hwmon tree does not already cover (TCPU, TCPU_PCI
+        # and friends). x86_pkg_temp duplicates coretemp, so it is skipped.
+        for z in sorted(glob.glob("/sys/class/thermal/thermal_zone*")):
+            t = (read_str(z + "/type") or "").strip()
+            tl = t.lower()
+            if not t or tl.startswith(("int340", "x86_pkg_temp")):
+                continue
+            if tl in seen_devices or tl.rstrip("_0123456789") in seen_devices:
+                continue
+            v = read_int(z + "/temp")
+            v = v / 1000.0 if v is not None else None
+            if not _sane_temp(v):
+                continue
+            crit = None
+            for tp in sorted(glob.glob(z + "/trip_point_*_type")):
+                if (read_str(tp) or "") == "critical":
+                    c = read_int(tp[:-5] + "_temp")
+                    if c and 1000 < c < 200000:
+                        crit = c / 1000.0
+                    break
+            out.append({
+                "key": "zone/" + t,
+                "label": t,
+                "group": temp_group(t),
+                "temp": v,
+                "crit": crit,
+                "high": None,
+            })
+
+        out.sort(key=lambda s: (GROUP_ORDER.index(s["group"]) if s["group"] in GROUP_ORDER else 99,
+                                s["label"]))
+        return out
+
+
+# Friendly names for the raw hwmon/thermal-zone labels. Anything not listed
+# falls through to "<Device> <label>", which is ugly but honest.
+TEMP_GROUPS = (
+    ({"coretemp", "k10temp", "zenpower", "cpu_thermal", "soc_thermal", "cpu-thermal"}, "cpu"),
+    ({"amdgpu", "i915", "xe", "nouveau", "radeon"}, "gpu"),
+    ({"nvme", "drivetemp"}, "drive"),
+    ({"acpitz", "thinkpad", "asus", "pch_skylake", "pch_cannonlake"}, "chassis"),
+    ({"iwlwifi", "mt7921", "ath11k", "ath12k"}, "wireless"),
+)
+
+GROUP_ORDER = ["cpu", "gpu", "chassis", "drive", "wireless", "other"]
+
+
+def temp_group(devname):
+    base = devname.lower().rstrip("_0123456789")
+    for names, group in TEMP_GROUPS:
+        if devname.lower() in names or base in names:
+            return group
+    return "other"
+
+
+def friendly_temp_label(devname, label, multi):
+    """Turn ("coretemp", "Package id 0") into "CPU package"."""
+    d, l = devname.lower(), label.lower().strip()
+    group = temp_group(devname)
+    if group == "cpu":
+        if "package" in l or l.startswith(("tctl", "tdie")):
+            return "CPU package"
+        if l in ("temp1", "temp"):
+            return "CPU"
+        return "CPU " + label
+    if group == "gpu":
+        return "GPU" if l in ("temp1", "edge", "") else "GPU " + label
+    if group == "drive":
+        if "composite" in l:
+            return "Drive composite"
+        if l.startswith("sensor"):
+            return "Drive sensor " + l[6:].strip()
+        return "Drive " + label
+    if group == "wireless":
+        return "Wi-Fi"
+    if group == "chassis":
+        n = l[4:] if l.startswith("temp") else ""
+        return ("Chassis " + n) if (multi and n) else "Chassis"
+    if l.startswith("temp"):
+        return devname
+    return devname + " " + label
+
+
+def friendly_fan_label(devname, label):
+    l = label.lower().strip()
+    if l in ("cpu_fan", "cpu fan", "fan1") and devname.lower() in ("asus", "thinkpad", "dell_smm"):
+        return "CPU fan"
+    if l in ("gpu_fan", "gpu fan"):
+        return "GPU fan"
+    if l.startswith("fan") and l[3:].isdigit():
+        return devname + " " + l[3:]
+    return label.replace("_", " ")
+
+
+def _sane_temp(v):
+    return v is not None and 1.0 < v < 200.0
+
+
+class DriveTemps:
+    """Physical-disk temperature, resolved through dm/partition layers once
+    and then cached: dm-0 -> nvme0n1p6 -> nvme0n1 -> hwmon4/temp1_input."""
+
+    def __init__(self):
+        self.base = {}
+        self.path = {}
+
+    def _resolve_base(self, dev, depth=0):
+        if not dev or depth > 4:
+            return None
+        slaves_dir = f"/sys/block/{dev}/slaves"
+        if os.path.isdir(slaves_dir):
+            slaves = sorted(os.listdir(slaves_dir))
+            if slaves:
+                return self._resolve_base(slaves[0], depth + 1)
+        if os.path.exists(f"/sys/class/block/{dev}/partition"):
+            parent = os.path.basename(os.path.dirname(os.path.realpath(f"/sys/class/block/{dev}")))
+            return self._resolve_base(parent, depth + 1) if parent and parent != dev else None
+        return dev if os.path.isdir(f"/sys/block/{dev}") else None
+
+    def _resolve_path(self, base):
+        for pat in (f"/sys/block/{base}/device/hwmon*/temp*_input",
+                    f"/sys/block/{base}/device/device/hwmon*/temp*_input"):
+            hits = sorted(glob.glob(pat))
+            if hits:
+                return hits[0]
+        return None
+
+    def temp(self, dev):
+        if dev not in self.base:
+            self.base[dev] = self._resolve_base(dev)
+        base = self.base[dev]
+        if not base:
+            return None
+        if base not in self.path:
+            self.path[base] = self._resolve_path(base)
+        p = self.path[base]
+        if not p:
+            return None
+        v = read_int(p)
+        v = v / 1000.0 if v is not None else None
+        return v if _sane_temp(v) else None
 
 
 class Rapl:
@@ -507,12 +702,13 @@ class Gpus:
             })
         return res
 
-    def snapshot(self, now, hwmon):
+    def snapshot(self, now, hwmon, pkg_temp=None):
         out = []
         for card in self.cards:
             v = card["vendor"]
             g = {"name": self.clean_name(card), "vendor": v, "busy": None, "freq_mhz": None,
-                 "max_freq_mhz": None, "temp": None, "power_w": None, "mem_used": None, "mem_total": None}
+                 "max_freq_mhz": None, "temp": None, "temp_shared": False, "power_w": None,
+                 "mem_used": None, "mem_total": None}
             if v == "0x8086":
                 g["busy"], g["freq_mhz"], g["max_freq_mhz"] = self.intel(card, now)
                 g["vendor"] = "intel"
@@ -529,6 +725,12 @@ class Gpus:
                 if temps:
                     g["temp"] = temps[0][1]
                 g["power_w"] = hwmon.power_w(card["hwmon"])
+            # Integrated graphics have no sensor of their own -- they sit on the
+            # CPU die, so the package reading IS their temperature. Flagged as
+            # shared so the panel can say so rather than implying a GPU probe.
+            if g["temp"] is None and g["vendor"] in ("intel", "amd") and pkg_temp is not None:
+                g["temp"] = pkg_temp
+                g["temp_shared"] = True
             out.append(g)
         out.extend(self.nvidia_query())
         return out
@@ -626,6 +828,7 @@ def main():
                 pass
 
     hwmon = Hwmon()
+    drive_temps = DriveTemps()
     rapl = Rapl()
     gpus = Gpus()
     procs = Procs()
@@ -715,7 +918,8 @@ def main():
                 r = (cur_disk[dev][0] - prev_disk[dev][0]) / elapsed
                 w = (cur_disk[dev][1] - prev_disk[dev][1]) / elapsed
             disks.append({**{k: m[k] for k in ("mount", "source", "fstype", "total", "used", "free", "mounts")},
-                          "read_bps": r, "write_bps": w})
+                          "read_bps": r, "write_bps": w,
+                          "temp": drive_temps.temp(dev) if dev else None})
 
         # ---- network
         cur_net = net_dev()
@@ -771,8 +975,9 @@ def main():
             "mem": {**meminfo(), "swap_devices": swap_devices()},
             "disks": disks,
             "nvme_temp": (hwmon.temps(nvme_dev)[0][1] if hwmon.temps(nvme_dev) else None),
+            "sensors": {"temps": hwmon.all_temps(), "fans": hwmon.all_fans()},
             "net": {"default": dflt, "ifaces": ifaces},
-            "gpus": gpus.snapshot(now, hwmon),
+            "gpus": gpus.snapshot(now, hwmon, pkg_temp),
             "processes": plist,
         }
         try:
