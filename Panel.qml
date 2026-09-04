@@ -542,6 +542,7 @@ Panel {
             implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroValue.implicitHeight)
 
             Text {
+              textFormat: Text.PlainText
               id: heroIcon
               text: root.icon
               color: root.foreground
@@ -561,6 +562,7 @@ Panel {
               spacing: Style.space(2)
 
               Text {
+                textFormat: Text.PlainText
                 text: root.snapshot ? root.snapshot.host : "Vitals"
                 color: root.foreground
                 font.family: root.fontFamily
@@ -571,6 +573,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 text: root.snapshot
                   ? ("UP " + Model.uptime(root.snapshot.uptime) + "  ·  LOAD " + Model.loadAvg(root.snapshot.load)).toUpperCase()
                   : "READING VITALS…"
@@ -591,6 +594,7 @@ Panel {
               spacing: 0
 
               Text {
+                textFormat: Text.PlainText
                 anchors.right: parent.right
                 text: root.headline
                 color: root.foreground
@@ -601,6 +605,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 anchors.right: parent.right
                 text: root.headlineCaption
                 color: root.faint
@@ -712,6 +717,7 @@ Panel {
             readonly property var coreTemp: hasTemp ? root.cpu.core_temps[index] : null
 
             Text {
+              textFormat: Text.PlainText
               id: coreLabel
               text: "C" + index
               color: root.dim
@@ -742,6 +748,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               id: coreValue
               text: Model.percent(load) + (hasTemp ? "  " + (coreTemp === null ? "   " : Model.temp(coreTemp)) : "")
               color: root.dim
@@ -865,6 +872,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: !root.mem || root.mem.swap_total <= 0
         text: "No swap configured"
         color: root.dim
@@ -882,6 +890,7 @@ Panel {
       spacing: Style.space(12)
 
       Text {
+        textFormat: Text.PlainText
         visible: root.hasData && root.disks.length === 0
         text: "No mounted filesystems found"
         color: root.dim
@@ -916,6 +925,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 text: Model.mountLabel(modelData.mount)
                 color: root.foreground
                 font.family: root.fontFamily
@@ -923,6 +933,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
               }
               Text {
+                textFormat: Text.PlainText
                 text: Model.fsLabel(modelData)
                 color: root.dim
                 font.family: root.fontFamily
@@ -931,6 +942,7 @@ Panel {
                 elide: Text.ElideRight
               }
               Text {
+                textFormat: Text.PlainText
                 readonly property bool has: modelData.temp !== null && modelData.temp !== undefined
                 visible: has
                 text: has ? "·  " + Model.temp(modelData.temp) : ""
@@ -942,6 +954,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               id: diskPct
               text: Model.percent(fraction * 100)
               color: root.foreground
@@ -960,6 +973,7 @@ Panel {
             implicitHeight: Math.max(diskUsage.implicitHeight, diskIo.implicitHeight)
 
             Text {
+              textFormat: Text.PlainText
               id: diskUsage
               text: Model.bytes(modelData.used) + " used  ·  " + Model.bytes(modelData.free) + " free of " + Model.bytes(modelData.total)
               color: root.dim
@@ -973,6 +987,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               id: diskIo
               visible: hasIo
               text: hasIo ? "read " + Model.rate(modelData.read_bps) + "   ·   write " + Model.rate(modelData.write_bps) : ""
@@ -985,6 +1000,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: modelData.mounts && modelData.mounts.length > 0
             width: parent.width
             text: modelData.mounts && modelData.mounts.length > 0 ? "also " + modelData.mounts.join(", ") : ""
@@ -1019,6 +1035,7 @@ Panel {
       spacing: Style.space(10)
 
       Text {
+        textFormat: Text.PlainText
         visible: root.hasData && root.ifaces.length === 0
         text: "No network interfaces found"
         color: root.dim
@@ -1103,16 +1120,17 @@ Panel {
           Row {
             spacing: Style.space(6)
             Rectangle { width: Style.space(10); height: 2; radius: 1; color: root.foreground; anchors.verticalCenter: parent.verticalCenter }
-            Text { text: "download"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            Text { textFormat: Text.PlainText; text: "download"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
           }
           Row {
             spacing: Style.space(6)
             Rectangle { width: Style.space(10); height: 2; radius: 1; color: root.alpha(root.foreground, 0.45); anchors.verticalCenter: parent.verticalCenter }
-            Text { text: "upload"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            Text { textFormat: Text.PlainText; text: "upload"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
           }
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.right: parent.right
           text: "peak " + Model.rate(Math.max(Model.maxOf(root.rxHistory, 0), Model.maxOf(root.txHistory, 0)))
           color: root.dim
@@ -1139,6 +1157,7 @@ Panel {
             implicitHeight: visible ? otherName.implicitHeight : 0
 
             Text {
+              textFormat: Text.PlainText
               id: otherName
               text: modelData.name + (modelData.ip ? "  " + modelData.ip : "")
               color: modelData.up ? root.foreground : root.dim
@@ -1149,6 +1168,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
             Text {
+              textFormat: Text.PlainText
               text: modelData.up ? "󰇚 " + Model.rate(modelData.rx_bps) + "   󰕒 " + Model.rate(modelData.tx_bps) : "down"
               color: root.dim
               font.family: root.fontFamily
@@ -1170,6 +1190,7 @@ Panel {
       spacing: Style.space(12)
 
       Text {
+        textFormat: Text.PlainText
         visible: root.hasData && root.gpus.length === 0
         text: "No GPU detected"
         color: root.dim
@@ -1267,6 +1288,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         visible: root.hasData && root.sensorTemps.length === 0
         width: parent.width
         text: "No usable temperature sensors"
@@ -1325,6 +1347,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: "Peaks cover the time this panel has been open."
         color: root.dim
@@ -1357,6 +1380,7 @@ Panel {
         implicitHeight: Math.max(procSummary.implicitHeight, filterField.implicitHeight)
 
         Text {
+          textFormat: Text.PlainText
           id: procSummary
           text: root.snapshot
             ? (root.filterText !== ""
@@ -1448,6 +1472,7 @@ Panel {
             height: Style.space(24)
 
             Text {
+              textFormat: Text.PlainText
               text: procRow.model.name
               color: root.foreground
               font.family: root.fontFamily
@@ -1461,6 +1486,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
             Text {
+              textFormat: Text.PlainText
               id: cellPid
               text: procRow.model.pid
               color: root.dim
@@ -1473,6 +1499,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
             Text {
+              textFormat: Text.PlainText
               id: cellUser
               text: procRow.model.user
               color: root.dim
@@ -1485,6 +1512,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
             Text {
+              textFormat: Text.PlainText
               id: cellMem
               text: Model.bytesShort(procRow.model.mem)
               color: root.sortKey === "mem" ? root.foreground : root.dim
@@ -1497,6 +1525,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
             Text {
+              textFormat: Text.PlainText
               id: cellCpu
               text: Model.percent(procRow.model.cpu, 1)
               color: root.sortKey === "cpu" ? root.foreground : root.dim
@@ -1543,6 +1572,7 @@ Panel {
             spacing: Style.space(6)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: procRow.model.cmd !== "" ? procRow.model.cmd : "(kernel thread)"
               color: root.dim
@@ -1554,6 +1584,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: "PID " + procRow.model.pid + "  ·  parent " + procRow.model.ppid + "  ·  " + procRow.model.threads
                 + (procRow.model.threads === 1 ? " thread" : " threads") + "  ·  " + Model.bytes(procRow.model.mem)
@@ -1605,6 +1636,7 @@ Panel {
     implicitHeight: Math.max(sectionLabel.implicitHeight, sectionValue.implicitHeight)
 
     Text {
+      textFormat: Text.PlainText
       id: sectionLabel
       text: label
       color: root.foreground
@@ -1618,6 +1650,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: sectionValue
       text: value
       color: valueDim ? root.dim : root.foreground
@@ -1670,6 +1703,7 @@ Panel {
     implicitHeight: Math.max(shareLabel.implicitHeight, shareValue.implicitHeight) + Style.spacing.sm
 
     Text {
+      textFormat: Text.PlainText
       id: shareLabel
       text: shareRow.label
       color: shareRow.strong ? root.foreground : root.dim
@@ -1702,6 +1736,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: shareValue
       text: Model.bytes(shareRow.amount)
       color: shareRow.strong ? root.foreground : root.dim
@@ -1732,6 +1767,7 @@ Panel {
     implicitHeight: Math.max(sensorLabel.implicitHeight, sensorReading.implicitHeight) + Style.spacing.sm
 
     Text {
+      textFormat: Text.PlainText
       id: sensorLabel
       text: sensorRow.label
       color: root.dim
@@ -1764,6 +1800,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: sensorReading
       text: sensorRow.reading
       color: root.foreground
@@ -1777,6 +1814,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: sensorTrailing
       text: sensorRow.trailing
       color: root.dim
@@ -1797,6 +1835,7 @@ Panel {
     spacing: Style.space(4)
 
     Text {
+      textFormat: Text.PlainText
       text: caption
       color: root.dim
       font.family: root.fontFamily
@@ -1804,6 +1843,7 @@ Panel {
       font.letterSpacing: 1
     }
     Text {
+      textFormat: Text.PlainText
       text: value
       color: root.foreground
       font.family: root.fontFamily
@@ -1823,6 +1863,7 @@ Panel {
     height: parent ? parent.height : Style.space(20)
 
     Text {
+      textFormat: Text.PlainText
       anchors.verticalCenter: parent.verticalCenter
       anchors.left: header.alignRight ? undefined : parent.left
       anchors.leftMargin: Style.space(6)
@@ -1853,6 +1894,7 @@ Panel {
     spacing: Style.space(8)
 
     Text {
+      textFormat: Text.PlainText
       id: pairLabel
       text: label
       color: root.foreground
@@ -1862,6 +1904,7 @@ Panel {
     }
     Item { width: Math.max(0, parent.width - pairLabel.implicitWidth - pairValue.implicitWidth - parent.spacing * 2); height: 1 }
     Text {
+      textFormat: Text.PlainText
       id: pairValue
       text: value
       color: root.foreground
